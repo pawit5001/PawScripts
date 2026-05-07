@@ -13,6 +13,7 @@ local DESCRIPTION_COOLDOWN_TIMEOUT = 15
 local STATS_MENU_KEY = Enum.KeyCode.M
 local STATS_MENU_RETRY_DELAY = 1
 local STATS_MENU_OPEN_COOLDOWN = 3
+local STATS_MENU_REFRESH_DELAY = 0.2
 local MOOLA_READY_TIMEOUT = 6
 local MOOLA_RETRY_DELAY = 0.5
 local HORST_READY_TIMEOUT = 20
@@ -51,22 +52,65 @@ local function waitForHorstDescription()
     return false
 end
 
-local function openStatsMenu()
-    if tick() - lastStatsMenuOpenAt < STATS_MENU_OPEN_COOLDOWN then
-        return false
-    end
-
-    local ok = pcall(function()
+local function toggleStatsMenu()
+    return pcall(function()
         VirtualInputManager:SendKeyEvent(true, STATS_MENU_KEY, false, game)
         task.wait(0.05)
         VirtualInputManager:SendKeyEvent(false, STATS_MENU_KEY, false, game)
     end)
+end
 
-    if ok then
-        lastStatsMenuOpenAt = tick()
+local function isStatsMenuOpen()
+    local gui = plr.PlayerGui:FindFirstChild("StatsGui")
+    if not gui then
+        return false
     end
 
-    return ok
+    if gui:IsA("ScreenGui") then
+        return gui.Enabled ~= false
+    end
+
+    local background = gui:FindFirstChild("Background")
+    if background and background:IsA("GuiObject") then
+        return background.Visible ~= false
+    end
+
+    return true
+end
+
+local function setStatsMenuOpen(shouldOpen)
+    if isStatsMenuOpen() == shouldOpen then
+        return true
+    end
+
+    return toggleStatsMenu()
+end
+
+local function refreshStatsMenu()
+    if tick() - lastStatsMenuOpenAt < STATS_MENU_OPEN_COOLDOWN then
+        return true
+    end
+
+    if isStatsMenuOpen() then
+        if not setStatsMenuOpen(false) then
+            return false
+        end
+        task.wait(STATS_MENU_REFRESH_DELAY)
+    end
+
+    if not setStatsMenuOpen(true) then
+        return false
+    end
+
+    task.wait(STATS_MENU_RETRY_DELAY)
+
+    if not setStatsMenuOpen(false) then
+        return false
+    end
+
+    task.wait(STATS_MENU_REFRESH_DELAY)
+    lastStatsMenuOpenAt = tick()
+    return true
 end
 
 -- 1. รายชื่อ Stand ที่ต้องการ (ถ้าได้แล้วให้เปลี่ยนไอดี)
@@ -183,18 +227,10 @@ local function getCurrentStand()
 end
 
 local function ensureStatsDataReady()
+    refreshStatsMenu()
+
     local currentStand, standReady = getCurrentStand()
     local currentTier = getCurrentTier()
-
-    if standReady and currentTier ~= "Unknown Tier" then
-        return currentStand, currentTier, true
-    end
-
-    if openStatsMenu() then
-        task.wait(STATS_MENU_RETRY_DELAY)
-        currentStand, standReady = getCurrentStand()
-        currentTier = getCurrentTier()
-    end
 
     return currentStand, currentTier, standReady and currentTier ~= "Unknown Tier"
 end
