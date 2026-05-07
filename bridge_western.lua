@@ -10,6 +10,7 @@ local DESCRIPTION_RETRY_DELAY = 0.75
 local DESCRIPTION_SETTLE_DELAY = 4
 local DESCRIPTION_COOLDOWN_WAIT = 2
 local DESCRIPTION_COOLDOWN_TIMEOUT = 15
+local REGULAR_DESCRIPTION_RESEND_INTERVAL = 20
 local STATS_MENU_KEY = Enum.KeyCode.M
 local STATS_MENU_RETRY_DELAY = 1
 local STATS_MENU_OPEN_COOLDOWN = 3
@@ -19,6 +20,7 @@ local MOOLA_RETRY_DELAY = 0.5
 local HORST_READY_TIMEOUT = 20
 
 local lastDescriptionMessage
+local lastDescriptionSentAt = 0
 local lastStatsMenuOpenAt = 0
 
 local function sanitizeDescriptionText(text)
@@ -304,6 +306,14 @@ local function pushDescriptionUntilSent(message, payload, timeoutSeconds)
     return false, lastErr or "Description send timeout"
 end
 
+local function shouldSendRegularDescription(message)
+    if message ~= lastDescriptionMessage then
+        return true
+    end
+
+    return tick() - lastDescriptionSentAt >= REGULAR_DESCRIPTION_RESEND_INTERVAL
+end
+
 -- 3. ฟังก์ชันจบงาน (เปลี่ยนสถานะเป็น DONE สีชมพู)
 local function handleDone(standName, tierName, moolaAmount, seedCount, fruitCount)
     local sheetData = { 
@@ -324,6 +334,7 @@ local function handleDone(standName, tierName, moolaAmount, seedCount, fruitCoun
         warn("Failed to send description before DONE:", logErr)
     else
         lastDescriptionMessage = message
+        lastDescriptionSentAt = tick()
     end
     
     task.wait(DESCRIPTION_SETTLE_DELAY)
@@ -360,10 +371,13 @@ spawn(function()
 
                 -- ถ้ายังไม่ใช่ตัวที่ต้องการ ให้อัปเดต Log ปกติ
                 local currentMessage = "💰 Moola: " .. currentMoola .. ", 🎭 Stand: " .. currentStand .. ", ⭐ Tier: " .. currentTier .. ", 🌱 Rokakaka Seed: " .. currentSeedCount .. ", 🍎 Rokakaka Fruits: " .. currentFruitCount
-                if canReportFullState then
-                    local logSent, logErr = pushDescription(currentMessage)
+                if canReportFullState and shouldSendRegularDescription(currentMessage) then
+                    local logSent, logErr = pushDescriptionUntilSent(currentMessage, nil, 8)
                     if logSent then
                         lastDescriptionMessage = currentMessage
+                        lastDescriptionSentAt = tick()
+                    elseif logErr and logErr ~= "Cooldown active" then
+                        warn("Failed to send regular description:", logErr)
                     end
                 end
             end
