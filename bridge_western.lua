@@ -2,6 +2,7 @@ if not game:IsLoaded() then game.Loaded:Wait() end
 
 local Players = game:GetService("Players")
 local HttpService = game:GetService("HttpService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local plr = Players.LocalPlayer
 
 local DESCRIPTION_RETRY_COUNT = 2
@@ -9,8 +10,15 @@ local DESCRIPTION_RETRY_DELAY = 0.75
 local DESCRIPTION_SETTLE_DELAY = 4
 local DESCRIPTION_COOLDOWN_WAIT = 2
 local DESCRIPTION_COOLDOWN_TIMEOUT = 15
+local STATS_MENU_KEY = Enum.KeyCode.M
+local STATS_MENU_RETRY_DELAY = 1
+local STATS_MENU_OPEN_COOLDOWN = 3
+local MOOLA_READY_TIMEOUT = 6
+local MOOLA_RETRY_DELAY = 0.5
+local HORST_READY_TIMEOUT = 20
 
 local lastDescriptionMessage
+local lastStatsMenuOpenAt = 0
 
 local function sanitizeDescriptionText(text)
     return tostring(text)
@@ -21,6 +29,44 @@ local function sanitizeDescriptionText(text)
         :gsub("%s+", " ")
         :gsub("^%s+", "")
         :gsub("%s+$", "")
+end
+
+local function cleanUiText(text)
+    return tostring(text or "")
+        :gsub("|", "")
+        :gsub(";", "")
+        :gsub("^%s+", "")
+        :gsub("%s+$", "")
+end
+
+local function waitForHorstDescription()
+    local deadline = tick() + HORST_READY_TIMEOUT
+    while tick() < deadline do
+        if _G.Horst_SetDescription then
+            return true
+        end
+        task.wait(0.5)
+    end
+
+    return false
+end
+
+local function openStatsMenu()
+    if tick() - lastStatsMenuOpenAt < STATS_MENU_OPEN_COOLDOWN then
+        return false
+    end
+
+    local ok = pcall(function()
+        VirtualInputManager:SendKeyEvent(true, STATS_MENU_KEY, false, game)
+        task.wait(0.05)
+        VirtualInputManager:SendKeyEvent(false, STATS_MENU_KEY, false, game)
+    end)
+
+    if ok then
+        lastStatsMenuOpenAt = tick()
+    end
+
+    return ok
 end
 
 -- 1. รายชื่อ Stand ที่ต้องการ (ถ้าได้แล้วให้เปลี่ยนไอดี)
@@ -78,8 +124,8 @@ local function getCurrentTier()
         return "Unknown Tier"
     end
 
-    local currentTier = tierTextObj.Text:gsub("Tier:%s*", ""):gsub("|", ""):gsub(";", ""):gsub("^%s+", ""):gsub("%s+$", "")
-    if currentTier == "" or currentTier == "???" then
+    local currentTier = cleanUiText(tierTextObj.Text:gsub("Tier:%s*", ""))
+    if currentTier == "" or currentTier == "???" or currentTier:lower() == "nil" then
         return "Unknown Tier"
     end
 
@@ -92,12 +138,65 @@ local function getCurrentMoola()
         return "Unknown"
     end
 
-    local currentMoola = coinAmountObj.Text:gsub("|", ""):gsub(";", ""):gsub("^%s+", ""):gsub("%s+$", "")
-    if currentMoola == "" or currentMoola == "???" then
+    local currentMoola = cleanUiText(coinAmountObj.Text)
+    if currentMoola == "" or currentMoola == "???" or currentMoola:lower() == "nil" or not currentMoola:find("%d") then
         return "Unknown"
     end
 
     return currentMoola
+end
+
+local function waitForCurrentMoola()
+    local currentMoola = getCurrentMoola()
+    if currentMoola ~= "Unknown" then
+        return currentMoola, true
+    end
+
+    local deadline = tick() + MOOLA_READY_TIMEOUT
+    while tick() < deadline do
+        task.wait(MOOLA_RETRY_DELAY)
+        currentMoola = getCurrentMoola()
+        if currentMoola ~= "Unknown" then
+            return currentMoola, true
+        end
+    end
+
+    return "Unknown", false
+end
+
+local function getCurrentStand()
+    local pathTextObj = getPathTextObj()
+    if not pathTextObj or not pathTextObj.Text then
+        return nil, false
+    end
+
+    local currentStand = cleanUiText(pathTextObj.Text:gsub("Path:%s*", ""))
+    if currentStand == "???" then
+        return "No Stand", true
+    end
+
+    if currentStand == "" or currentStand:lower() == "nil" then
+        return "No Stand", false
+    end
+
+    return currentStand, true
+end
+
+local function ensureStatsDataReady()
+    local currentStand, standReady = getCurrentStand()
+    local currentTier = getCurrentTier()
+
+    if standReady and currentTier ~= "Unknown Tier" then
+        return currentStand, currentTier, true
+    end
+
+    if openStatsMenu() then
+        task.wait(STATS_MENU_RETRY_DELAY)
+        currentStand, standReady = getCurrentStand()
+        currentTier = getCurrentTier()
+    end
+
+    return currentStand, currentTier, standReady and currentTier ~= "Unknown Tier"
 end
 
 local function getRokakakaCounts()
@@ -206,30 +305,26 @@ end
 
 -- 4. ลูปหลัก
 print("🚀 Multi-Stand Watcher Active...")
+waitForHorstDescription()
 
 spawn(function()
     while true do
         local success, result = pcall(function()
-            local pathTextObj = getPathTextObj()
-            if pathTextObj then
-                local txt = pathTextObj.Text
-                local currentTier = getCurrentTier()
-                local currentMoola = getCurrentMoola()
+            local currentStand, currentTier, statsReady = ensureStatsDataReady()
+            if currentStand then
+                local currentMoola, moolaReady = waitForCurrentMoola()
                 local currentSeedCount, currentFruitCount = getRokakakaCounts()
-                -- Clean ข้อความชื่อ Stand
-                local currentStand = txt:gsub("Path:%s*", ""):gsub("|", ""):gsub(";", ""):gsub("^%s+", ""):gsub("%s+$", "")
-                
-                if currentStand == "" or currentStand == "???" then currentStand = "No Stand" end
+                local canReportFullState = statsReady and moolaReady
 
                 -- ตรวจสอบว่าชื่อปัจจุบัน อยู่ในลิสต์ที่ต้องการหรือไม่
-                if TARGET_STANDS[currentStand] then
+                if TARGET_STANDS[currentStand] and canReportFullState then
                     handleDone(currentStand, currentTier, currentMoola, currentSeedCount, currentFruitCount)
                     return true -- หยุดลูป
                 end
 
                 -- ถ้ายังไม่ใช่ตัวที่ต้องการ ให้อัปเดต Log ปกติ
                 local currentMessage = "💰 Moola: " .. currentMoola .. ", 🎭 Stand: " .. currentStand .. ", ⭐ Tier: " .. currentTier .. ", 🌱 Rokakaka Seed: " .. currentSeedCount .. ", 🍎 Rokakaka Fruits: " .. currentFruitCount
-                if currentMessage ~= lastDescriptionMessage then
+                if canReportFullState then
                     local logSent, logErr = pushDescription(currentMessage)
                     if logSent then
                         lastDescriptionMessage = currentMessage
